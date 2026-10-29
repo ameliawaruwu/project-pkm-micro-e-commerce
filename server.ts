@@ -5,9 +5,15 @@ import dotenv from 'dotenv';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import dns from 'dns';
 import { deployRouter } from './backend/deployController';
 
 dotenv.config();
+
+// Beberapa jaringan memiliki IPv6 yang tidak ter-route keluar dengan baik,
+// menyebabkan error "ENETUNREACH" saat Node mencoba konek ke host (mis. Gmail SMTP)
+// lewat alamat IPv6. Paksa resolusi DNS mengutamakan IPv4 untuk menghindari ini.
+dns.setDefaultResultOrder('ipv4first');
 
 const app = express();
 const PORT = process.env.PORT || 5055;
@@ -71,11 +77,31 @@ app.post('/api/send-email', async (req, res) => {
     }
 
     const isGmail = smtpEmail.toLowerCase().includes('@gmail.com');
+    const smtpHostname = isGmail ? 'smtp.gmail.com' : 'smtp.ethereal.email';
+
+    // Nodemailer v10 melakukan resolusi DNS sendiri (resolve4 + resolve6) lalu memilih
+    // alamat secara ACAK, sehingga opsi `family: 4` bawaan nodemailer diabaikan. Pada
+    // jaringan yang IPv6-nya tidak ter-route keluar, ini menyebabkan "ENETUNREACH" tiap
+    // kali alamat IPv6 terpilih. Untuk itu kita resolve IPv4 secara manual dan sambungkan
+    // langsung ke IP tersebut, sembari tetap mengirim `servername` asli agar verifikasi
+    // sertifikat TLS tidak gagal.
+    const smtpHostIpv4: string = await new Promise((resolve, reject) => {
+      dns.resolve4(smtpHostname, (err, addresses) => {
+        if (err || !addresses || !addresses.length) {
+          return reject(err || new Error(`Gagal resolve alamat IPv4 untuk ${smtpHostname}`));
+        }
+        resolve(addresses[0]);
+      });
+    });
+
     const transporter = nodemailer.createTransport({
-      host: isGmail ? 'smtp.gmail.com' : 'smtp.ethereal.email',
+      host: smtpHostIpv4,
       port: 587,
       secure: false,
       requireTLS: true,
+      tls: {
+        servername: smtpHostname, // perlu agar SNI & verifikasi sertifikat TLS tetap cocok dengan hostname asli
+      },
       auth: {
         user: smtpEmail,
         pass: smtpPassword,

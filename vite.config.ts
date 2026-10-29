@@ -1117,12 +1117,31 @@ function emailDevPlugin(): Plugin {
             }
 
             const nodemailer = await import('nodemailer');
+            const dnsMod = await import('dns');
             const isGmail = smtpEmail.toLowerCase().includes('@gmail.com');
+            const smtpHostname = isGmail ? 'smtp.gmail.com' : 'smtp.ethereal.email';
+
+            // Nodemailer v10 melakukan resolusi DNS sendiri (resolve4 + resolve6) lalu memilih
+            // alamat secara ACAK, sehingga opsi `family: 4` diabaikan dan bisa memicu
+            // "ENETUNREACH" di jaringan tanpa route IPv6 keluar. Resolve IPv4 manual & connect
+            // langsung ke IP tsb, sembari tetap kirim `servername` asli untuk verifikasi TLS.
+            const smtpHostIpv4: string = await new Promise((resolve, reject) => {
+              dnsMod.resolve4(smtpHostname, (err, addresses) => {
+                if (err || !addresses || !addresses.length) {
+                  return reject(err || new Error(`Gagal resolve alamat IPv4 untuk ${smtpHostname}`));
+                }
+                resolve(addresses[0]);
+              });
+            });
+
             const transporter = nodemailer.createTransport({
-              host: isGmail ? 'smtp.gmail.com' : 'smtp.ethereal.email',
+              host: smtpHostIpv4,
               port: 587,
               secure: false,
               requireTLS: true,
+              tls: {
+                servername: smtpHostname,
+              },
               auth: {
                 user: smtpEmail,
                 pass: smtpPassword,
